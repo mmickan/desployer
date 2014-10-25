@@ -1,0 +1,99 @@
+#!/bin/bash
+#
+# create-qa-domain
+#
+# This script sets up data (in Consul) for the QA data centre.
+#
+
+######################################################################
+# SCRIPT CONFIGURATION
+######################################################################
+
+# flavour, image, placement, role and (optionally) MAC address of
+# each host this script defines
+declare -A host_config
+host_config[puppetmaster]="m1.small ubuntu-14-04 server4 puppetmaster"
+host_config[testvm]="m1.tiny ubuntu-14-04 server4 base"
+host_config[testvm-qemu]="m1.tiny ubuntu-14-04 server3 base"
+
+# enable naive autosigning (note: DO NOT do this in prod)
+autosign=true
+
+# Consul data centre and domain settings
+data_centre=qa
+consul_domain=consul
+
+# this setting is appended to hostname parameter by the other scripts in
+# this directory if it's not fully qualified (purely for convenience)
+default_domain=node.${data_centre}.${consul_domain}
+
+# upstream DNS server to be used by Unbound
+upstream_dns=`grep nameserver /etc/resolv.conf | awk 'NR<2 { print $2 }'`
+
+# base Consul URL under which node data is stored
+consul_nodes=http://localhost:8500/v1/kv/nodes
+
+######################################################################
+# FUNCTIONS
+######################################################################
+
+usage(){
+    echo
+    echo "Usage: $0 [--help]"
+    echo
+    echo "This script is configured by editing the configuration section"
+    echo "within it.  See comments within the script for more information."
+    echo
+    exit 1
+}
+if [ "$1" = "--help" ]; then usage; fi
+
+log(){ echo -e "\e[32m\e[1m--> ${1}...\e[0m"; }
+warn(){ echo -e "\e[33m\e[1mWARNING: ${1}\e[0m"; }
+error(){ echo -e "\e[31m\e[1mERROR: ${1}\e[0m"; }
+fatal(){ echo -e "\e[31m\e[1mFATAL: ${1}\e[0m\n\n  Hint: try '$0 --help'\n"; exit 1; }
+
+######################################################################
+# DO STUFF
+######################################################################
+
+log "Setting default domain to ${default_domain}"
+curl -s -o /dev/null -X PUT -d "$default_domain" http://localhost:8500/v1/kv/default-domain
+
+log "Setting upstream DNS to ${upstream_dns}"
+curl -s -o /dev/null -X PUT -d "$upstream_dns" http://localhost:8500/v1/kv/common/upstream-dns
+
+for i in ${!host_config[@]}; do
+    log "Setting configuration for '${i}'"
+    curl -s -o /dev/null -X PUT -d "${data_centre}_${i}" "${consul_nodes}/${default_domain}/${i}/instance-id"
+    curl -s -o /dev/null -X PUT -d "${data_centre}" "${consul_nodes}/${default_domain}/${i}/data-centre"
+    if [ "$i" = "puppetmaster" ]; then
+        profile=puppetmaster
+        curl -s -o /dev/null -X PUT -d "${autosign}" "${consul_nodes}/${default_domain}/${i}/bootstrap-profile/autosign"
+    else
+        profile=puppet
+        curl -s -o /dev/null -X PUT -d "puppet.service.${data_centre}.${consul_domain}" "${consul_nodes}/${default_domain}/${i}/bootstrap-profile/puppetmaster"
+    fi
+    curl -s -o /dev/null -X PUT -d "$profile" "${consul_nodes}/${default_domain}/${i}/bootstrap-profile"
+
+    fiprm=( ${host_config[$i]} )  # fip is short for flavour, image, placement, mac
+    curl -s -o /dev/null -X PUT -d "${fiprm[0]}" "${consul_nodes}/${default_domain}/${i}/flavour"
+    curl -s -o /dev/null -X PUT -d "${fiprm[1]}" "${consul_nodes}/${default_domain}/${i}/machine-image"
+    curl -s -o /dev/null -X PUT -d "${fiprm[2]}" "${consul_nodes}/${default_domain}/${i}/placement"
+    curl -s -o /dev/null -X PUT -d "role::${fiprm[3]}" "${consul_nodes}/${default_domain}/${i}/role"
+    if [ ${#fipm[*]} -gt 4 ]; then
+        curl -s -o /dev/null -X PUT -d "${fipm[4]}" "${consul_nodes}/${default_domain}/${i}/mac-address/eth0"
+    fi
+done
+
+# With appropriate handling to inject this into a VM's config disk,
+# something like this should be able to be used to set a static IPv4
+# address:
+#curl -s -o /dev/null -X PUT -T - http://localhost:8500/v1/kv/nodes/qa.articul-8.com/puppetmaster/network-interfaces <<'EOF'
+#iface eth0 inet static
+#address 192.168.2.50
+#network 192.168.2.0
+#netmask 255.255.255.0
+#broadcast 192.168.2.255
+#gateway 192.168.2.1
+#EOF

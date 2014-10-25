@@ -1,0 +1,35 @@
+#cloud-config
+
+preserve_hostame: false
+manage_etc_hosts: true
+
+users:
+  - name: root
+    lock_passwd: false
+    ssh_authorized_keys:
+      - ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAwde/EK6qqUtPKc19Khk/daJ23sh+TMtjnOV2Nd8WVr/cZyowPwttFHo2yN4xjzkHOLqLW0vCp4/jiv1XvhidOqfTDKVIPDc3Re/Xgxmy5ATYo1GXCi58rBHLt2gC1Jhc+009oU9uo3ApSsAhFwJIPwMX2N9Bxi/4LHC+AVcsG/qkUJmrSQeWGCw5Ac8NFK2layH7KDdh9ZoRsqS10gQASVOz31xInaqAd5qJNlvEKa2+R/jvleq2lnkF/eQTRHckuZGkyqjoqSa3TJ+1AF5grJe/NXhiKHWCDImU+nQkCaYXwZv0Bp3KFJYwBDK7u9sp/9Wkz6KETOi3GT8U2beBfw== mmickan
+disable_root: false
+chpasswd:
+  list: |
+    root:RANDOM
+  expire: false
+
+# remove the vagrant user early in the boot process to ensure it's gone
+# before networking comes up
+bootcmd:
+ - [ cloud-init-per, once, remove_vagrant_user, userdel, -r, vagrant ]
+
+locale: en_AU.UTF-8
+locale_configfile: /etc/default/locale
+
+# grow the LVM partition (but not the VG or LV) on first boot
+growpart:
+  mode: growpart
+devices: [ '/dev/vda2' ]
+
+# use runcmd to grow the VG, LV and root filesystem, as cloud-init
+# doesn't handle LVM resizing natively
+runcmd:
+  - [ cloud-init-per, once, grow_VG, pvresize, /dev/vda2 ]
+  - [ cloud-init-per, once, grow_LV, lvextend, -l, +100%FREE, /dev/system/root ]
+  - [ cloud-init-per, once, grow_fs, resize2fs, /dev/system/root ]

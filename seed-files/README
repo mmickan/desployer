@@ -1,0 +1,6 @@
+Files in this directory are available for injection into a VM's config disk
+for use by cloud-init.
+
+Which files are injected is determined by the profile, assigned to a VM
+using the Consul key "/v1/kv/nodes/<domain>/<host>/bootstrap-profile".  Each
+profile is then defined in the profiles array in the deploy-vm script.

@@ -1,0 +1,84 @@
+#!/bin/bash
+#
+# stop-vm
+#
+# Convenience script to gracefully shut down a virtual machine.
+#
+
+######################################################################
+# SCRIPT CONFIGURATION
+######################################################################
+
+default_domain=`curl -s 'http://localhost:8500/v1/kv/default-domain?raw'`
+
+######################################################################
+# FUNCTIONS
+######################################################################
+
+usage(){
+    echo
+    echo "Usage: $0 <hostname>"
+    echo
+    echo " <hostname>: the name of the VM being shut down"
+    echo
+    echo " The following structure is expected in Consul:"
+    echo
+    echo "  /v1/kv/nodes"
+    echo "    /<domain>"
+    echo "      /<hostname>"
+    echo "        /instance-id          unique instance id"
+    echo "        /machine-image        base image from which disk is instantiated"
+    echo "        /bootstrap-profile    a valid bootstrap profile (see below)"
+    echo "        /flavour              a valid VM flavour (see below)"
+    echo "        /placement            vmhost to on which VM will run"
+    echo "        /network-interfaces   optional static network configuration"
+    echo
+    echo " The following bootstrap profiles are defined:"
+    echo
+    echo "   puppetmaster: bootstrap as a puppetmaster host"
+    echo "   puppet:       bootstrap as a puppet-managed host"
+    echo "   none:         do not bootstrap"
+    echo
+    echo " The following flavours are defined:"
+    echo
+    echo "   m1.tiny:   512MB RAM, 1 VCPU, 10GB /dev/vda"
+    echo "   m1.small:  2GB RAM, 1 VCPU, 10GB /dev/vda, 20GB /dev/vdb"
+    echo "   m1.medium: 4GB RAM, 2 VCPUs, 10GB /dev/vda, 40GB /dev/vdb"
+    echo "   m1.large:  8GB RAM, 4 VCPUs, 10GB /dev/vda, 80GB /dev/vdb"
+    echo "   m1.xlarge: 16GB RAM, 8 VCPUs, 10GB /dev/vda, 160GB /dev/vdb"
+    echo
+    exit 1
+}
+if [ "$1" = "--help" ]; then usage; fi
+
+log(){ echo -e "\e[32m\e[1m--> ${1}...\e[0m"; }
+warn(){ echo -e "\e[33m\e[1mWARNING: ${1}\e[0m"; }
+error(){ echo -e "\e[31m\e[1mFATAL: ${1}\e[0m"; }
+fatal(){ echo -e "\e[31m\e[1mFATAL: ${1}\e[0m"; usage; }
+
+consul_param(){ curl -s "http://localhost:8500/v1/kv/nodes/${2}/${1}/${3}?raw"; }
+
+######################################################################
+# GATHER/VALIDATE DATA
+######################################################################
+
+# ensure a hostname was provided
+fqdn=$1
+if [ -z $fqdn ]; then
+    fatal "hostname not provided"
+fi
+
+# pull in remaining parameters from Consul
+hostname=`echo $fqdn | sed 's/^\([^\.]*\).*$/\1/'`;     [ -z $hostname ]  && fatal "hostname not valid"
+domain=`echo $fqdn | sed 's/^[^\.]*\.\(.*\)$/\1/'`;     [ $domain = $hostname ] && domain=
+if [ -z $domain ]; then
+    domain=${default_domain}
+    fqdn=${hostname}.${domain}
+fi
+placement=`consul_param $hostname $domain 'placement'`;       [ -z $placement ] && fatal "placement for $fqdn not provided"
+
+######################################################################
+# DO STUFF
+######################################################################
+
+virsh -c qemu+ssh://${placement}/system shutdown $fqdn
