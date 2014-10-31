@@ -159,16 +159,11 @@ cat > /etc/puppet/hiera.yaml <<'EOF'
   :datadir: "/etc/puppet/environments/%{::environment}/hieradata"
 
 :consul:
-  :host: 127.0.0.1
-  :port: 8500
   :paths:
-    - "/v1/kv/nodes/%{::domain}/%{::hostname}"
-    - "/v1/kv/osfamily/%{::osfamily}"
-    - "/v1/kv/locations/%{::location}"
-    - "/v1/kv/common"
-  :use_ssl: false
-  :failure: graceful
-  :ignore_404: true
+    - "kv/nodes/%{::domain}/%{::hostname}"
+    - "kv/osfamily/%{::osfamily}"
+    - "kv/locations/%{::location}"
+    - "kv/common"
 EOF
 ln -sf /etc/puppet/hiera.yaml /etc/hiera.yaml
 
@@ -192,7 +187,7 @@ cat > Puppetfile <<EOF
 forge 'https://forgeapi.puppetlabs.com/'
 
 mod 'puppetlabs/puppetdb'
-mod 'lynxman/hiera_consul'
+mod 'mmickan/hiera_consul', :git => 'https://github.com/mmickan/hiera-consul'
 EOF
 
 git add .
