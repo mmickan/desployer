@@ -148,6 +148,7 @@ cat > /etc/puppet/hiera.yaml <<'EOF'
 :backends:
   - yaml
   - consul
+  - module_data
 
 :hierarchy:
   - "nodes/%{::fqdn}"
@@ -188,6 +189,7 @@ forge 'https://forgeapi.puppetlabs.com/'
 
 mod 'puppetlabs/puppetdb'
 mod 'mmickan/hiera_consul', :git => 'https://github.com/mmickan/hiera-consul'
+mod 'ripienaar/module_data'
 EOF
 
 git add .
