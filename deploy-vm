@@ -22,7 +22,7 @@ flavours[m1.xlarge]="16384 10 160 8"
 # list of files (from seed-files dir) included in each bootstrap profile
 common="cloud-config consul.sh unbound.sh update-mac.sh"
 declare -A profiles
-profiles[puppetmaster]="$common puppetmaster-bootstrap.sh"
+profiles[puppetmaster]="$common puppetmaster-bootstrap.sh puppetmaster-production.sh"
 profiles[puppet]="$common puppet-bootstrap.sh"
 
 # volume pool for OS disk
