@@ -12,9 +12,13 @@
 # flavour, image, placement, role and (optionally) MAC address of
 # each host this script defines
 declare -A host_config
+
+# Puppetlabs' PostgreSQL module doesn't support non-LTS Ubuntu releases
 host_config[puppetmaster]="m1.small ubuntu-14-04 server4 puppetmaster"
-host_config[testvm]="m1.tiny ubuntu-14-04 server4 base"
-host_config[testvm-qemu]="m1.tiny ubuntu-14-04 server3 base"
+
+host_config[serverspec]="m1.tiny ubuntu-14-10 server4 base"
+host_config[testvm]="m1.tiny scientific-6-6 server4 base"
+#host_config[testvm-qemu]="m1.tiny ubuntu-14-10 server3 base"
 
 # enable naive autosigning (note: DO NOT do this in prod)
 autosign=true

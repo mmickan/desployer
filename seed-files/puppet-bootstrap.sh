@@ -20,7 +20,7 @@ export PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin
 log(){ echo -e "\e[32m\e[1m--> ${1}...\e[0m"; }
 
 # apt-get update if one hasn't been performed recently
-if [ `find /var/cache/apt/pkgcache.bin -mmin +30` ]; then
+[ -e /var/cache/apt/pkgcache.bin ] && if [ `find /var/cache/apt/pkgcache.bin -mmin +30` ]; then
     log "Performing apt-get update"
     apt-get update
 fi
@@ -28,22 +28,33 @@ fi
 # install the tools we're going to require
 if [ -z `which wget` ]; then
     log "Installing wget"
-    apt-get install -y wget
+    [ -e /usr/bin/apt-get ] && apt-get install -y wget
+    [ -e /usr/bin/yum]      && yum -y -q install wget
 fi
 
 log "Retrieving parameters from Consul"
 puppetmaster=`wget -q -O- http://localhost:8500/v1/kv/nodes/$(dnsdomainname)/$(hostname)/bootstrap-profile/puppetmaster?raw`
 log "puppetmaster is $puppetmaster"
 
-log "Installing PuppetLabs apt repo"
-cd /root
-wget https://apt.puppetlabs.com/puppetlabs-release-trusty.deb
-dpkg -i puppetlabs-release-trusty.deb
-rm puppetlabs-release-trusty.deb
-apt-get update
+if [ -e /usr/bin/apt-get ]; then
+    log "Installing PuppetLabs apt repo"
+    cd /root
+    # PuppetLabs only supports LTS releases for Ubuntu, so use that even if
+    # we're on a later version.  Note that Debian is not supported by this
+    # script (yet), though it is supported by PuppetLabs.
+    wget https://apt.puppetlabs.com/puppetlabs-release-trusty.deb
+    dpkg -i puppetlabs-release-trusty.deb
+    rm puppetlabs-release-trusty.deb
+    apt-get update
+elif [ -e /usr/bin/yum ]; then
+    log "Installing PuppetLabs yum repo"
+    # Note that this only supports RHEL6 derivatives at the moment
+    yum -y -q install http://yum.puppetlabs.com/puppetlabs-release-el-6.noarch.rpm
+fi
 
 log "Installing Puppet and friends"
-apt-get install -y puppet
+[ -e /usr/bin/apt-get ] && apt-get install -y puppet
+[ -e /usr/bin/yum ]     && yum -y -q install puppet
 
 log "Configuring Puppet"
 sed -i '

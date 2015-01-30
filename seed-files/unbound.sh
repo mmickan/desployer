@@ -14,7 +14,7 @@ export PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin
 log(){ echo -e "\e[32m\e[1m--> ${1}...\e[0m"; }
 
 # run apt-get update if it hasn't been run recently
-if [ `find /var/cache/apt/pkgcache.bin -mmin +30` ]; then
+[ -e /usr/bin/apt-get ] && if [ `find /var/cache/apt/pkgcache.bin -mmin +30` ]; then
     log "Performing apt-get update"
     apt-get update
 fi
@@ -22,7 +22,8 @@ fi
 # install the tools we're going to require
 if [ -z `which wget` ]; then
     log "Installing wget"
-    apt-get install -y wget
+    [ -e /usr/bin/apt-get ] && apt-get install -y wget
+    [ -e /usr/bin/yum ]     && yum -y -q install wget
 fi
 
 log "Retrieving parameters from Consul"
@@ -51,14 +52,28 @@ EOF
 
 if [ ! -e /usr/sbin/unbound ]; then
     log "Installing Unbound"
-    apt-get install -y unbound
+
+    # Debian and derivatives
+    if [ -e /usr/bin/apt-get ]; then
+        apt-get install -y unbound
+
+    # RHEL and derivatives
+    elif [ -e /usr/bin/yum ]; then
+        yum -y -q install unbound
+        echo "include: /etc/unbound/unbound.conf.d/*.conf" >> /etc/unbound/unbound.conf
+        service unbound start
+
+    else
+        log "Unable to install unbound"
+        exit 1
+    fi
 else
     log "Restarting Unbound"
     service unbound restart
 fi
 
 log "Reconfiguring DNS resolver to use Unbound and Consul"
-resolvconf --disable-updates
+[ -e /sbin/resolvconf ] && resolvconf --disable-updates
 cat > /etc/resolv.conf <<EOF
 nameserver 127.0.0.1
 search node.${data_centre}.${consul_domain} service.${data_centre}.${consul_domain}
