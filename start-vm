@@ -10,7 +10,7 @@
 # SCRIPT CONFIGURATION
 ######################################################################
 
-default_domain=`curl -s 'http://localhost:8500/v1/kv/default-domain?raw'`
+default_domain=`curl -s 'http://localhost:8500/v1/kv/desployer/default-domain?raw'`
 
 ######################################################################
 # FUNCTIONS

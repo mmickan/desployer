@@ -18,6 +18,8 @@ host_config[puppetmaster]="m1.small ubuntu-14-04 server4 puppetmaster"
 
 host_config[serverspec]="m1.tiny ubuntu-14-10 server4 base"
 host_config[testvm]="m1.tiny scientific-6-6 server4 base"
+host_config[http]="m1.tiny scientific-6-6 server4 http"
+host_config[pgsql]="m1.tiny scientific-6-6 server4 pgsql_standalone"
 #host_config[testvm-qemu]="m1.tiny ubuntu-14-10 server3 base"
 
 # enable naive autosigning (note: DO NOT do this in prod)
@@ -43,10 +45,14 @@ consul_nodes=http://localhost:8500/v1/kv/nodes
 
 usage(){
     echo
-    echo "Usage: $0 [--help]"
+    echo "Usage: $0 [options]"
     echo
     echo "This script is configured by editing the configuration section"
     echo "within it.  See comments within the script for more information."
+    echo
+    echo " Options:"
+    echo "  --help         display this mess"
+    echo "  --clear        remove all entries before recreating"
     echo
     exit 1
 }
@@ -61,8 +67,13 @@ fatal(){ echo -e "\e[31m\e[1mFATAL: ${1}\e[0m\n\n  Hint: try '$0 --help'\n"; exi
 # DO STUFF
 ######################################################################
 
+if [ "$1" = "--clear" ]; then
+    log 'Clearing existing configuration'
+    curl -X DELETE http://localhost:8500/v1/kv/?recurse=true
+fi
+
 log "Setting default domain to ${default_domain}"
-curl -s -o /dev/null -X PUT -d "$default_domain" http://localhost:8500/v1/kv/default-domain
+curl -s -o /dev/null -X PUT -d "$default_domain" http://localhost:8500/v1/kv/desployer/default-domain
 
 log "Setting upstream DNS to ${upstream_dns}"
 curl -s -o /dev/null -X PUT -d "$upstream_dns" http://localhost:8500/v1/kv/common/upstream-dns
@@ -80,13 +91,13 @@ for i in ${!host_config[@]}; do
     fi
     curl -s -o /dev/null -X PUT -d "$profile" "${consul_nodes}/${default_domain}/${i}/bootstrap-profile"
 
-    fiprm=( ${host_config[$i]} )  # fip is short for flavour, image, placement, mac
+    fiprm=( ${host_config[$i]} )  # fiprm is short for flavour, image, placement, role, mac
     curl -s -o /dev/null -X PUT -d "${fiprm[0]}" "${consul_nodes}/${default_domain}/${i}/flavour"
     curl -s -o /dev/null -X PUT -d "${fiprm[1]}" "${consul_nodes}/${default_domain}/${i}/machine-image"
     curl -s -o /dev/null -X PUT -d "${fiprm[2]}" "${consul_nodes}/${default_domain}/${i}/placement"
     curl -s -o /dev/null -X PUT -d "role::${fiprm[3]}" "${consul_nodes}/${default_domain}/${i}/role"
-    if [ ${#fipm[*]} -gt 4 ]; then
-        curl -s -o /dev/null -X PUT -d "${fipm[4]}" "${consul_nodes}/${default_domain}/${i}/mac-address/eth0"
+    if [ ${#fiprm[*]} -gt 4 ]; then
+        curl -s -o /dev/null -X PUT -d "${fiprm[4]}" "${consul_nodes}/${default_domain}/${i}/mac-address/eth0"
     fi
 done
 
