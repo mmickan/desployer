@@ -39,8 +39,17 @@ declare -A vm_template
 vm_template[server3]=qemu.xml.erb
 vm_template[default]=kvm.xml.erb
 
+# the acl_master_token from the vmhost - used to retrieve values from consul
+acl_token=`cat /etc/consul.d/*.json | tr '\n' ' ' | sed 's/.*"acl_master_token"\s*:\s*"\([^"]*\)".*/\1/'`
+
 # domain to use if hostname parameter is not fully qualified
-default_domain=`curl -s 'http://localhost:8500/v1/kv/default-domain?raw'`
+default_domain=`curl -s "http://localhost:8500/v1/kv/desployer/default-domain?raw&token=${acl_token}"`
+
+# acl_datacenter setting from the vmhost is passed through to VM
+acl_dc=`cat /etc/consul.d/*.json | tr '\n' ' ' | sed 's/.*"acl_master_token"\s*:\s*"\([^"]*\)".*/\1/'`
+
+# encrypt setting from the vmhost is passed through to VM
+key=`cat /etc/consul.d/*.json | tr '\n' ' ' | sed 's/.*"encrypt"\s*:\s*"\([^"]*\)".*/\1/'`
 
 ######################################################################
 # FUNCTIONS
@@ -87,7 +96,7 @@ warn(){ echo -e "\e[33m\e[1mWARNING: ${1}\e[0m"; }
 error(){ echo -e "\e[31m\e[1mERROR: ${1}\e[0m"; }
 fatal(){ echo -e "\e[31m\e[1mFATAL: ${1}\e[0m\n\n  Hint: try '$0 --help'\n"; exit 1; }
 
-consul_param(){ curl -s "http://localhost:8500/v1/kv/nodes/${2}/${1}/${3}?raw"; }
+consul_param(){ curl -s "http://localhost:8500/v1/kv/nodes/${2}/${1}/${3}?raw&token=${acl_token}"; }
 
 ######################################################################
 # GATHER/VALIDATE DATA
@@ -192,6 +201,8 @@ do
                     /##start parameters##/,/##end parameters##/ {
                         s/^JOIN=.*$/JOIN="'"$join"'"/
                         s/^DC=.*$/DC="'"$dc"'"/
+                        s/^ACL_DC=.*$/ACL_DC="'"$acl_dc"'"/
+                        s/^KEY=.*$/KEY="'"$key"'"/
                         /^##[a-z]* parameters##$/d
                     }
                 ' > 00-${fqdn}_consul.sh

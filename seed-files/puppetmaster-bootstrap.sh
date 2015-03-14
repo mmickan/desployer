@@ -151,6 +151,7 @@ cat > /etc/puppet/hiera.yaml <<'EOF'
   - module_data
 
 :hierarchy:
+  - "fqdn/%{::fqdn}"
   - "nodes/%{::fqdn}"
   - "osfamily/%{::osfamily}"
   - "locations/%{::location}"

@@ -64,6 +64,7 @@ puppet config set --section agent environment production
 puppet config set --section agent report true
 puppet config set --section agent show_diff true
 puppet config set --section agent server $puppetmaster
+puppet config set --section main stringify_facts false
 puppet config set --section main postrun_command 'wget -q -O- http://localhost:8500/v1/agent/check/pass/service:puppetagent'
 
 log "Configuring puppet agent service in Consul"
@@ -79,6 +80,14 @@ cat >/etc/consul.d/puppetagent.json <<EOF
 }
 EOF
 service consul reload
+
+# we clear these rules as a workaround for an issue with puppetlabs'
+# firewall module not being able to clear out unmanaged ip6tables rules and
+# iptables rules in the same pass with "resources { 'iptables': purge => true }"
+log "Clearing ip6tables rules"
+echo -n > /etc/sysconfig/ip6tables
+service ip6tables restart
+# end of workaround
 
 log "Running puppet agent"
 puppet agent -t --waitforcert 10

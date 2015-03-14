@@ -11,6 +11,8 @@
 ##start parameters##
 JOIN=
 DC=
+ACL_DC=
+KEY=
 ##end parameters##
 
 # ensure a sane environment, even when running under cloud-init during boot
@@ -28,25 +30,18 @@ log(){ echo -e "\e[32m\e[1m--> ${1}...\e[0m"; }
 log "Deploying custom configuration for Consul"
 mkdir -p /etc/consul.d
 
-cat > /etc/consul.d/start_join.json <<EOF
+cat > /etc/consul.d/config.json <<EOF
 {
-    "start_join": [${JOIN}]
-}
-EOF
-
-cat > /etc/consul.d/data_centre.json <<EOF
-{
-    "datacenter": "${DC}"
-}
-EOF
-
-cat > /etc/consul.d/dns.json <<EOF
-{
+    "data_dir": "/var/lib/consul",
+    "datacenter": "${DC}",
     "dns_config": {
         "allow_stale": true,
         "node_ttl": "5s"
     },
-    "domain": "${CONSUL_DOMAIN}"
+    "domain": "${CONSUL_DOMAIN}",
+    "start_join": [${JOIN}],
+    "acl_datacenter": "${ACL_DC}",
+    "encrypt": "${KEY}"
 }
 EOF
 
@@ -77,13 +72,15 @@ if [ ! -e /usr/bin/consul ]; then
         esac
 
         URL="https://dl.bintray.com/mitchellh/consul/${ZIP}"
-        curl -s -k -L -o /tmp/consul_$ZIP $URL || {
+        mkdir -p /opt/staging/consul
+        curl -s -k -L -o /opt/staging/consul/consul.zip $URL || {
             log "Unable to download Consul"
             exit 1
         }
 
-        unzip -qq /tmp/consul_${ZIP} -d /usr/bin/
-        rm -f /tmp/consul_${ZIP}
+        unzip -qq /opt/staging/consul/consul.zip -d /usr/bin/
+        # leave this file in place so puppet doesn't re-download/re-install
+        #rm -f /opt/staging/consul/consul.zip
 
         cat > /etc/init.d/consul <<'EOF'
 #!/bin/bash
@@ -97,12 +94,16 @@ if [ ! -e /usr/bin/consul ]; then
 
 . /etc/rc.d/init.d/functions
 
+CONSUL=/usr/bin/consul
+CONFIG=/etc/consul.d
+PID_FILE=/var/run/consul/pidfile
+LOG_FILE=/var/log/consul
+
 [ -f /etc/sysconfig/consul ] && . /etc/sysconfig/consul
 [ -f /etc/default/consul ] && . /etc/default/consul
 
 RETVAL=0
 prog="consul"
-CONSUL="/usr/bin/consul"
 
 start()
 {
@@ -113,19 +114,25 @@ start()
     BIND=`ifconfig eth0 | grep "inet addr" | awk '{ print substr($2,6) }'`
 
     [ -x $CONSUL ] || exit 5
-    [ -d /etc/consul.d ] || exit 6
+    [ -d $CONFIG ] || exit 6
 
     echo -n $"Starting $prog: "
-    $CONSUL agent -config-dir="/etc/consul.d" -bind=$BIND ${CONSUL_FLAGS} >/dev/null 2>&1 &
+    daemon --user=consul --pidfile="$PID_FILE" $CONSUL agent -config-dir="${CONFIG}" -bind=${BIND} ${CONSUL_FLAGS} >> "$LOG_FILE" 2>&1 &
     echo $"[ OK ]"
-    return $RETVAL
+    retcode=$?
+    touch /var/lock/subsys/consul
+    return $retcode
 }
 
 stop()
 {
     echo -n $"Stopping $prog: "
-    $CONSUL leave >/dev/null 2>&1
+    $CONSUL leave
+
+    retcode=$?
+    rm -f /var/lock/subsys/consul
     echo $"[ OK ]"
+    return $retcode
 }
 
 restart()
@@ -182,12 +189,9 @@ exit $RETVAL
 EOF
         chmod 0755 /etc/init.d/consul
         chkconfig --add consul
-
-        cat > /etc/consul.d/20-agent.json <<'EOF'
-{
-  "data_dir": "/var/lib/consul"
-}
-EOF
+        useradd --system -U consul
+        mkdir -m 0750 /var/lib/consul
+        chown consul:consul /var/lib/consul
 
         log "Starting Consul"
         service consul start

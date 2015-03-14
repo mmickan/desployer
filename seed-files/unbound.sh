@@ -50,6 +50,19 @@ forward-zone:
     forward-addr: ${upstream_dns}
 EOF
 
+mkdir -p /etc/unbound/conf.d
+
+cat > /etc/unbound/conf.d/consul.conf <<EOF
+server:
+    do-not-query-localhost: no
+    private-domain: "${consul_domain}."
+    domain-insecure: "${consul_domain}."
+
+forward-zone:
+    name: "${consul_domain}."
+    forward-addr: 127.0.0.1@8600
+EOF
+
 if [ ! -e /usr/sbin/unbound ]; then
     log "Installing Unbound"
 
