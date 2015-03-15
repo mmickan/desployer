@@ -23,7 +23,7 @@ export PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin
 CONSUL_DOMAIN=`hostname -f | sed "s/^.*\.${DC}\.//"`
 
 # consul version (only used if downloading Hashicorp's zip distribution)
-VERSION=0.4.1
+VERSION=0.5.0
 
 log(){ echo -e "\e[32m\e[1m--> ${1}...\e[0m"; }
 
