@@ -13,46 +13,49 @@ export PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin
 
 log(){ echo -e "\e[32m\e[1m--> ${1}...\e[0m"; }
 
-# run apt-get update if it hasn't been run recently
-[ -e /usr/bin/apt-get ] && if [ `find /var/cache/apt/pkgcache.bin -mmin +30` ]; then
-    log "Performing apt-get update"
-    apt-get update
-fi
-
 # install the tools we're going to require
-if [ -z `which wget` ]; then
-    log "Installing wget"
-    [ -e /usr/bin/apt-get ] && apt-get install -y wget
-    [ -e /usr/bin/yum ]     && yum -y -q install wget
+if [ -z `which curl` ]; then
+    log "Installing curl"
+    yum -y -q install curl
 fi
 
 log "Retrieving parameters from Consul"
-upstream_dns=`wget -q -O- http://localhost:8500/v1/kv/common/upstream-dns?raw`
+upstream_dns=`curl -s http://localhost:8500/v1/kv/common/upstream-dns?raw`
+
+# Configuring a forward-zone without any forward-addr entries causes certain
+# disaster - fall back to Google Public DNS if necessary
+if [ -z "$upstream_dns" ]; then
+    if [ `ifconfig eth0 | grep 'inet addr:'` ]; then
+        # IPv4 only or dual stack
+        upstream_dns='8.8.8.8 8.8.4.4'
+    elif [ `ifconfig eth0 | grep 'inet6 addr:' | grep -v ' fe80::'` ]; then
+        # IPv6 only
+        upstream_dns='2001:4860:4860::8888 2001:4860:4860::8844'
+    else
+        # can't find an IPv4 or IPv6 address - hedge our bets
+        upstream_dns='8.8.8.8 2001:4860:4860::8888'
+    fi
+fi
 
 data_centre=`hostname -f | sed 's/^.*\.node\.\([^\.]*\).*$/\1/'`
 consul_domain=`hostname -f | sed 's/^.*\.node\.[^\.]*\.\(.*\)$/\1/'`
 
 log "Deploying custom configuration for Unbound"
-mkdir -p /etc/unbound/unbound.conf.d
+mkdir -p /etc/unbound/conf.d
 
-cat > /etc/unbound/unbound.conf.d/consul.conf <<EOF
-server:
-    do-not-query-localhost: no
-    private-domain: "${consul_domain}."
-    domain-insecure: "${consul_domain}."
-
-forward-zone:
-    name: "${consul_domain}."
-    forward-addr: 127.0.0.1@8600
+cat > /etc/unbound/conf.d/forward-all.conf <<EOF
+# Forward all queries to upstream resolvers.
 
 forward-zone:
     name: "."
-    forward-addr: ${upstream_dns}
 EOF
-
-mkdir -p /etc/unbound/conf.d
+for resolver in $upstream_dns; do
+    echo "    forward-addr: $resolver" >> /etc/unbound/conf.d/forward-all.conf
+done
 
 cat > /etc/unbound/conf.d/consul.conf <<EOF
+# Forward queries to ${consul_domain} to Consul
+
 server:
     do-not-query-localhost: no
     private-domain: "${consul_domain}."
@@ -66,20 +69,9 @@ EOF
 if [ ! -e /usr/sbin/unbound ]; then
     log "Installing Unbound"
 
-    # Debian and derivatives
-    if [ -e /usr/bin/apt-get ]; then
-        apt-get install -y unbound
+    yum -y -q install unbound
+    service unbound start
 
-    # RHEL and derivatives
-    elif [ -e /usr/bin/yum ]; then
-        yum -y -q install unbound
-        echo "include: /etc/unbound/unbound.conf.d/*.conf" >> /etc/unbound/unbound.conf
-        service unbound start
-
-    else
-        log "Unable to install unbound"
-        exit 1
-    fi
 else
     log "Restarting Unbound"
     service unbound restart

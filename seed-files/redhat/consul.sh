@@ -27,6 +27,17 @@ VERSION=0.5.0
 
 log(){ echo -e "\e[32m\e[1m--> ${1}...\e[0m"; }
 
+# install the tools we're going to require
+if [ -z `which curl` ]; then
+    log "Installing curl"
+    yum -y -q install curl
+fi
+
+if [ -z `which unzip` ]; then
+    log "Installing unzip"
+    yum -y -q install unzip
+fi
+
 log "Deploying custom configuration for Consul"
 mkdir -p /etc/consul.d
 
@@ -47,42 +58,33 @@ EOF
 
 if [ ! -e /usr/bin/consul ]; then
 
-    # there's a package available for Ubuntu to make things easy
-    if [ -e /usr/bin/apt-get ]; then
-        log "Installing Consul from bcandrea/consul PPA"
-        apt-add-repository -y ppa:bcandrea/consul
-        apt-get update
-        apt-get install -y consul consul-web-ui
-
-    # otherwise, try to do it the hard way
-    elif [ -e /usr/bin/unzip -a -e /usr/bin/curl ]; then
-        log "Installing Consul version ${VERSION}"
-        ARCH=`uname -m`
-        case "${ARCH}" in
-            i386)
-                ZIP="${VERSION}_linux_386.zip"
-                ;;
-            x86_64)
-                ZIP="${VERSION}_linux_amd64.zip"
-                ;;
-            *)
-                log "Unable to install Consul (unknown arch ${ARCH})"
-                exit 1
-                ;;
-        esac
-
-        URL="https://dl.bintray.com/mitchellh/consul/${ZIP}"
-        mkdir -p /opt/staging/consul
-        curl -s -k -L -o /opt/staging/consul/consul.zip $URL || {
-            log "Unable to download Consul"
+    log "Installing Consul version ${VERSION}"
+    ARCH=`uname -m`
+    case "${ARCH}" in
+        i386)
+            ZIP="${VERSION}_linux_386.zip"
+            ;;
+        x86_64)
+            ZIP="${VERSION}_linux_amd64.zip"
+            ;;
+        *)
+            log "Unable to install Consul (unknown arch ${ARCH})"
             exit 1
-        }
+            ;;
+    esac
 
-        unzip -qq /opt/staging/consul/consul.zip -d /usr/bin/
-        # leave this file in place so puppet doesn't re-download/re-install
-        #rm -f /opt/staging/consul/consul.zip
+    URL="https://dl.bintray.com/mitchellh/consul/${ZIP}"
+    mkdir -p /opt/staging/consul
+    curl -s -k -L -o /opt/staging/consul/consul.zip $URL || {
+        log "Unable to download Consul"
+        exit 1
+    }
 
-        cat > /etc/init.d/consul <<'EOF'
+    unzip -qq /opt/staging/consul/consul.zip -d /usr/bin/
+    # leave this file in place so puppet doesn't re-download/re-install
+    #rm -f /opt/staging/consul/consul.zip
+
+    cat > /etc/init.d/consul <<'EOF'
 #!/bin/bash
 #
 # consul            Start up the Consul agent
@@ -187,24 +189,20 @@ case "$1" in
 esac
 exit $RETVAL
 EOF
-        chmod 0755 /etc/init.d/consul
-        chkconfig --add consul
-        useradd --system -U consul
-        mkdir -m 0750 /var/lib/consul
-        chown consul:consul /var/lib/consul
+    chmod 0755 /etc/init.d/consul
+    chkconfig --add consul
+    useradd --system -U consul
+    mkdir -m 0750 /var/lib/consul
+    chown consul:consul /var/lib/consul
 
-        log "Starting Consul"
-        service consul start
-        # consul needs a moment to start up... the next script to run is
-        # going to expect it to be ready to answer queries, so pause here
-        sleep 2
-
-    else
-        log "Unable to install Consul (tools unavailable)"
-        exit 1
-    fi
+    log "Starting Consul"
+    service consul start
+    # consul needs a moment to start up... the next script to run is
+    # going to expect it to be ready to answer queries, so pause here
+    sleep 2
 
 else
+    # Consul is already installed (i.e. baked into gold master)
     log "Restarting Consul"
     service consul restart
 fi
