@@ -1,0 +1,632 @@
+#!/bin/bash
+#
+# desployer
+#
+# A shell script for deploying and destroying virtual machines with libvirt.
+# This intention is to provide simple setup and teardown of a QA environment
+# from within a CI tool such as Jenkins, while also being suitable for
+# deployment of VMs in a production environment.
+#
+# Takes a subcommand as the first argument - use "desployer help" for a list
+# of available subcommands.
+#
+# The configuration file is, in order of preference:
+#   ./desployer.conf
+#   ~/.desployer.conf
+#   /etc/desployer.conf
+#
+
+version=0.5.0
+
+declare -A flavours
+declare -A profiles
+declare -A vm_template
+
+if [ -f ./desployer.conf ]; then
+  config=./desployer.conf
+elif [ -f ~/.desployer.conf ]; then
+  config=~/.desployer.conf
+else [ -f /etc/desployer.conf ]
+  config=/etc/desployer.conf
+fi
+
+[ -f $config ] && . $config
+
+# domain to use with unqualified hostnames
+domain=`curl -s "${consul_url}/v1/kv/desployer/default-domain?raw&token=${acl_token}"`
+
+######################################################################
+# Built-in documentation
+######################################################################
+
+usage(){
+    cat <<EOF
+
+Usage: $0 [--version] [--help] <command> [<args>]
+
+Available commands are:
+    console     view console for a given VM
+    destroy     stop VMs and remove configuration
+    up          deploy and start VMs
+
+Globally recognised args:
+    --xxx       xxx
+EOF
+
+    exit 1
+}
+
+version(){
+    cat <<EOF
+Desployer version $version
+EOF
+
+    exit 0
+}
+
+######################################################################
+# Functions
+######################################################################
+
+# Display message to user.  Takes one parameter, which is the message to
+# output.  Message is coloured based on its severity.
+log(){ echo -e "\e[32m\e[1m--> ${1}...\e[0m"; }
+warn(){ echo -e "\e[33m\e[1mWARNING: ${1}\e[0m"; }
+error(){ echo -e "\e[31m\e[1mERROR: ${1}\e[0m"; }
+fatal(){ echo -e "\e[31m\e[1mFATAL: ${1}\e[0m"; exit 1; }
+
+# Retrieve settings from Consul for a given host.  Parameters are:
+# - $1: unqualified hostname
+# - $2: setting name
+consul_param(){ curl -s "${consul_url}/v1/kv/nodes/${domain}/${1}/${2}?raw&token=${acl_token}"; }
+
+# Determine status of VM by querying libvirt.  Takes a single parameter
+# which is the unqualified hostname.
+query_libvirt(){
+    local host=$1
+    local placement=`consul_param $host 'placement'`
+
+    local status=`virsh -c qemu+ssh://${placement}/system list --all | awk 'NR>2 && $2 == "'"${host}.${domain}"'" { printf("%s",$3) }'`
+    if [ "$status" = "" ]; then
+        echo -n 'absent'
+    else
+        echo -n $status | sed 's| ||g'
+    fi
+}
+
+# Determine status of VM by querying Consul.  Takes a single parameter which
+# is the unqualified hostname.  The status provided by Consul includes
+# whether or not the node is a part of the Consul cluster, and if it is a
+# part of that cluster also includes the list of services from the Consul
+# catalogue for that node.
+query_consul(){
+    local host=$1
+
+    # Consul cluster membership status of node
+    local status=`consul members | awk 'NR>1 && $1 == "'"$host"'" { printf("%s",$3) }'`
+    if [ -z "$status" ]; then
+        echo -n 'absent'
+    else
+        echo -n $status | sed 's| ||g'
+    fi
+
+    # Services from Consul catalogue.  Note that we use the string 'none' if
+    # there are no services for $host in the Consul catalogue.  This keeps
+    # the number of fields consistent to make the status easier to parse.
+    if [ "$status" = "alive" ]; then
+        local services=`curl -s "${consul_url}/v1/catalog/node/${host}?token=${acl_token}" | jq -c '[.Services[].Service]' | sed 's/[]"[]//g'`
+        if [ -n "$services" ]; then
+            echo -n " $services"
+        else
+            echo -n ' none'
+        fi
+    else
+        echo -n ' none'
+    fi
+}
+
+# Remove a VM.  If the VM is running, it will be shut down before being
+# removed.  Parameters are:
+# - $1: unqualified hostname of VM to remove
+# - $2: remove perpetual disk flag (1=remove, 0=keep)
+remove_vm(){
+    local host=$1
+    local remove_perpetual=${2:-0}
+
+    local fqdn="${host}.${domain}"
+    local placement=`consul_param $host 'placement'`; [ -z "$placement" ] && fatal "placement for $host not provided"
+
+    # shut down the VM
+    local vm_running=$(virsh -c qemu+ssh://${placement}/system list | awk 'NR>2 { print $2 }' | grep "^${fqdn}$" | wc -l)
+    if [ $vm_running -gt 0 ]; then
+        log "Shutting down ${host}"
+        virsh -c qemu+ssh://${placement}/system destroy ${fqdn}
+        for i in 1 2 3 4 5; do
+            vm_running=$(virsh -c qemu+ssh://${placement}/system list | awk 'NR>2 { print $2 }' | grep "^${fqdn}$" | wc -l)
+            if [ $vm_running -eq 0 ]; then
+                break
+            fi
+            sleep 1
+        done
+        vm_running=$(virsh -c qemu+ssh://${placement}/system list | awk 'NR>2 { print $2 }' | grep "^${fqdn}$" | wc -l)
+        if [ $vm_running -gt 0 ]; then
+            fatal "Unable to shutdown ${host}"
+        fi
+    fi
+
+    # remove the VM
+    local vm_exists=$(virsh -c qemu+ssh://${placement}/system list --all | awk 'NR>2 { print $2 }' | grep "^${fqdn}$" | wc -l)
+    if [ $vm_exists -gt 0 ]; then
+        log "Removing ${host}"
+        virsh -c qemu+ssh://${placement}/system undefine ${fqdn}
+    fi
+
+    # remove the various disks
+    for disk in disk1 disk2 seed; do
+        if [ "$disk" = "disk2" ]; then
+            if [ $remove_perpetual -ne 1 ]; then
+                # remove_perpetual flag MUST be provided to delete disk2
+                continue
+            fi
+        fi
+        eval pool=\$${disk}_pool
+        local vol_exists=$(virsh -c qemu+ssh://${placement}/system vol-list --pool ${pool} | awk 'NR>2 { print $1 }' | grep "^${fqdn}_${disk}$" | wc -l)
+        if [ $vol_exists -gt 0 ]; then
+            log "Removing disk volume '${fqdn}_${disk}'"
+            virsh -c qemu+ssh://${placement}/system vol-delete ${fqdn}_${disk} --pool ${pool}
+        fi
+    done
+}
+
+# Converts the name of a gold master image to a list of directories in which
+# to look for seed files (a.k.a. configuration files to pass to cloud-init).
+# Takes a single parameter which is the name of the gold master image.
+# Outputs a string of space-separated paths that looks something like:
+#  ./seed-files/rhel-6-6/ ./seed-file/rhel-6/ ./seed-files/rhel/ ./seed-files/
+gm_image_to_seed_paths(){
+    local gm_image=$1
+
+    # TODO: move base_seed_path to the config file, or search for it the way
+    # we do for the config file
+    local base_seed_path="./seed-files/"
+
+    # treat Scientific and CentOS as Redhat
+    case $gm_image in
+        scientific*|centos*)
+            gm_image=`echo -n $gm_image | sed -E 's/(scientific|centos)/redhat/'`
+            ;;
+    esac
+
+    # construct the seed paths
+    local seed_paths=""
+    while [ -n "$gm_image" ]; do
+        seed_paths="${seed_paths}${base_seed_path}${gm_image}/ "
+        gm_image=`echo -n $gm_image | awk 'BEGIN{FS="-"; OFS="-";} {$NF=""; NF--; print $0}'`
+    done
+    seed_paths="${seed_paths}${base_seed_path}"
+
+    echo -n $seed_paths
+}
+
+# Build an ISO image to be used as the config disk for cloud-init.  Takes
+# the following parameters:
+# - $1: unqualified hostname for which image is required
+# - $2: name of profile to use (see profiles configuration hash)
+# - $3: filename to write image to
+# - $4: name of gold master image (allows using different seed files for
+#       different gold masters)
+build_seed_disk(){
+    local host=$1
+    local profile=$2
+    local seed_disk=$3
+    local gm_image=$4
+
+    local fqdn="${host}.${domain}"
+    local seed_paths=( `gm_image_to_seed_paths $gm_image` )
+
+    # build and list the component files for the multipart mime file
+    local multipart_files=
+    for seedfile in ${profiles[$profile]}
+    do
+        # find the appropriate seed file for this gm image
+        for path in ${seed_paths[@]}; do
+            if [[ -f "${path}${seedfile}" ]]; then
+                seed_path=$path
+                break
+            fi
+        done
+        if [[ ! -f "${seed_path}${seedfile}" ]]; then
+            fatal "Seed file ${seedfile} not found for ${gm_image}. Exiting."
+        fi
+
+        case $seedfile in
+            cloud-config)
+                multipart_files="$multipart_files ${seed_path}${seedfile}:text/cloud-config"
+                ;;
+
+            consul*.sh)
+                local join=
+                for server in `consul members | awk 'NR>1 && $4 == "server" { split($2,server,":"); print server[1] }'`; do
+                    [ ! -z $join ] && join="$join, "
+                    join="$join\\\\\"$server\\\\\""
+                done
+                if [ -z "$join" ]; then
+                    fatal "Unable to find Consul servers"
+                fi
+                log "Using consul servers `echo \$join | sed 's|\\\\||g'`"
+
+                cat "${seed_path}${seedfile}" \
+                    | sed '
+                        /##start parameters##/,/##end parameters##/ {
+                            s/^ACL_DC=.*$/ACL_DC="'"$acl_dc"'"/
+                            s/^ACL_MASTER_TOKEN=.*$/ACL_MASTER_TOKEN="'"$acl_master_token"'"/
+                            s/^ACL_TOKEN=.*$/ACL_TOKEN="'"$acl_token"'"/
+                            s/^DC=.*$/DC="'"$dc"'"/
+                            s/^JOIN=.*$/JOIN="'"$join"'"/
+                            s/^KEY=.*$/KEY="'"$key"'"/
+                            /^##[a-z]* parameters##$/d
+                        }
+                    ' > 00-${fqdn}_consul.sh
+
+                multipart_files="$multipart_files 00-${fqdn}_consul.sh:text/x-shellscript"
+                ;;
+
+            unbound.sh)
+                cp "${seed_path}${seedfile}" 01-${fqdn}_unbound.sh
+                multipart_files="$multipart_files 01-${fqdn}_unbound.sh:text/x-shellscript"
+                ;;
+
+            *.sh)
+                multipart_files="$multipart_files ${seed_path}${seedfile}:text/x-shellscript"
+                ;;
+
+            *)
+                warn "ignoring unknown file '${seedfile}'"
+                ;;
+        esac
+    done
+
+    log "Building multipart user-data"
+    write-mime-multipart --gzip --output=${fqdn}_userdata.txt $multipart_files
+
+    log "Building config disk image"
+    cloud-localds -H $fqdn ${seed_disk} ${fqdn}_userdata.txt
+
+    # remove working files
+    rm -f 00-${fqdn}_consul.sh
+    rm -f 01-${fqdn}_unbound.sh
+    rm -f ${fqdn}_userdata.txt
+}
+
+# Deploy a VM.  Takes the following parameters:
+# - $1: unqualified hostname of VM to deploy
+deploy_vm(){
+    local host=$1
+
+    local fqdn="${host}.${domain}"
+
+    # read and validate host info from Consul
+    profile=`consul_param $host 'bootstrap-profile'`; [ -z $profile ]   && fatal "bootstrap-profile for $host not provided"
+    placement=`consul_param $host 'placement'`;       [ -z $placement ] && fatal "placement for $host not provided"
+    image=`consul_param $host 'machine-image'`;       [ -z $image ]     && fatal "machine-image for $host not provided"
+    flavour=`consul_param $host 'flavour'`;           [ -z $flavour ]   && fatal "flavour for $host not provided"
+    dc=`consul_param $host 'data-centre'`;            [ -z $dc ]        && fatal "data-centre for $host not provided"
+    mac=`consul_param $host 'mac-address/eth0'`
+
+    # read and validate flavour info from config
+    declare -a mddv
+    index=0
+    for i in ${flavours[$flavour]}; do
+        mddv[$index]=$i
+        ((index++))
+    done
+
+    memory=${mddv[0]}; [ $memory -eq 0 ] && fatal "flavour for $host not valid"
+    disk1=${mddv[1]};  [ $disk1 -eq 0 ]  && fatal "flavour for $host not valid"
+    disk2=${mddv[2]}
+    vcpus=${mddv[3]};  [ $vcpus -eq 0 ]  && fatal "flavour for $host not valid"
+
+    log "Deploying ${host}"
+
+    # create OS disk
+    local vol_exists=$(virsh -c qemu+ssh://${placement}/system vol-list --pool ${disk1_pool} | awk 'NR>2 { print $1 }' | grep "^${fqdn}_disk1$" | wc -l)
+    if [ $vol_exists -eq 0 ]; then
+        log "Creating OS volume from '${image}' image"
+        export vol_size=${disk1}
+        export format=qcow2
+        export backing_path=$(virsh -c qemu+ssh://${placement}/system vol-list --pool ${disk1_pool} | awk 'NR>2 && $1 == "gm-'"${image}"'" { print $2 }')
+        if [ -z $backing_path ]; then
+            fatal "Machine image '${image}' not found on '${placement}'"
+        fi
+        export backing_format=qcow2  # TODO: get this from virsh vol-dumpxml
+        export vol_name=${fqdn}_disk1
+        erb templates/snapshot.xml.erb >${fqdn}_disk1.xml
+        virsh -c qemu+ssh://${placement}/system vol-create ${disk1_pool} ${fqdn}_disk1.xml
+    else
+        log "OS volume already exists, not creating"
+    fi
+
+    # create additional (unformatted) disk(s)
+    for disk in disk2; do
+        eval pool=\$${disk}_pool
+        eval vol_size=\$$disk
+        if [ $vol_size -gt 0 ]; then
+            vol_exists=$(virsh -c qemu+ssh://${placement}/system vol-list --pool ${pool} | awk 'NR>2 { print $1 }' | grep "^${fqdn}_${disk}$" | wc -l)
+            if [ $vol_exists -eq 0 ]; then
+                log "Creating '${fqdn}_${disk}' volume with size ${vol_size}G"
+                virsh -c qemu+ssh://${placement}/system vol-create-as $pool ${fqdn}_${disk} ${vol_size}G --format qcow2
+            else
+                log "'${fqdn}_${disk}' volume already exists, not creating"
+            fi
+        fi
+    done
+
+    # create seed disk
+    build_seed_disk $host $profile "${fqdn}_seed.iso" $image
+
+    # create seed volume in libvirt storage pool if it doesn't already exist
+    vol_exists=$(virsh -c qemu+ssh://${placement}/system vol-list --pool ${seed_pool} | awk 'NR>2 { print $1 }' | grep "^${fqdn}_seed$" | wc -l)
+    if [ $vol_exists -eq 0 ]
+    then
+        vol_size=$(stat -Lc%s ${fqdn}_seed.iso)
+        log "Creating volume '${fqdn}_seed' with size $vol_size"
+        virsh -c qemu+ssh://${placement}/system vol-create-as $seed_pool ${fqdn}_seed $vol_size --format raw
+    fi
+
+    # upload the seed disk image
+    log "Uploading volume '${fqdn}_seed' to pool '$seed_pool' on host '$placement'"
+    virsh -c qemu+ssh://${placement}/system vol-upload --pool $seed_pool ${fqdn}_seed ${fqdn}_seed.iso
+
+    # create VM
+    template=${vm_template[$placement]}
+    if [ -z $template ]; then
+        template=${vm_template[default]}
+    fi
+    export fqdn
+    export memory
+    export vcpus
+    export mac
+    export disk1_path=$(virsh -c qemu+ssh://${placement}/system vol-list --pool ${disk1_pool} | awk 'NR>2 && $1 == "'"${fqdn}"'_disk1" { print $2 }')
+    export disk1_format=qcow2
+    export disk2_path=$(virsh -c qemu+ssh://${placement}/system vol-list --pool ${disk1_pool} | awk 'NR>2 && $1 == "'"${fqdn}"'_disk2" { print $2 }')
+    export disk2_format=qcow2
+    erb templates/${template} >${fqdn}_vm.xml
+    vm_exists=$(virsh -c qemu+ssh://${placement}/system list --all | awk 'NR>2 { print $2 }' | grep "^${fqdn}$" | wc -l)
+    if [ $vm_exists -eq 0 ]; then
+        log "Creating VM '${host}' on '${placement}'"
+        virsh -c qemu+ssh://${placement}/system define ${fqdn}_vm.xml
+    else
+        log "VM '${host}' is already defined on '${placement}', not creating"
+    fi
+
+    # remove working files
+    rm -f ${fqdn}_seed.iso
+    rm -f ${fqdn}_disk1.xml
+    rm -f ${fqdn}_vm.xml
+}
+
+# Start a VM.  Takes a single parameter which is the hostname.
+start_vm(){
+    local host=$1
+
+    local fqdn="${host}.${domain}"
+    local placement=`consul_param $host 'placement'`; [ -z $placement ] && fatal "placement for $host not found"
+
+    log "Starting '${host}' on '${placement}'"
+    virsh -c qemu+ssh://${placement}/system start $fqdn
+}
+
+open_console(){
+    local host=$1
+
+    local fqdn="${host}.${domain}"
+    local placement=`consul_param $host 'placement'`; [ -z $placement ] && fatal "placement for $host not found"
+
+    log "Viewing console for '${host}' on '${placement}' (ctrl+] to exit)"
+    virsh -c qemu+ssh://${placement}/system console $fqdn
+}
+
+######################################################################
+# Subcommands
+######################################################################
+
+console_usage(){
+    cat <<EOF
+
+Usage: $0 console <hostname>
+EOF
+
+    exit 1
+}
+
+console(){
+    local host=$1
+
+    open_console $host
+}
+
+######################################################################
+
+up_usage(){
+    cat <<EOF
+
+Usage: $0 up [<args>] [<hostname>]
+
+Valid args are:
+    help                display this mess
+    --all               bring up all hosts
+    --remove-perpetual  remove and reprovision perpetual disks
+EOF
+
+    exit 1
+}
+
+up(){
+    PARSED_OPTIONS=$(getopt -n "$0" -o a --long "all,remove-perpetual" -- "$@")
+    if [[ $? -ne 0 ]]; then
+        up_usage
+    fi
+    eval set -- "$PARSED_OPTIONS"
+
+    while true; do
+        case "$1" in
+            -a|--all)
+                all=1
+                shift;;
+            --remove-perpetual)
+                remove_perpetual=1
+                shift;;
+            --)
+                shift
+                break;;
+        esac
+    done
+
+    # construct list of hosts, either from command line or by pulling all
+    # host names within $domain in from Consul
+    declare -a hosts
+    if [[ $all -eq 1 ]]; then
+        hosts=( `curl -s "${consul_url}/v1/kv/nodes/${domain}/?keys&separator=/&token=${acl_token}" | sed -e "s|nodes/${domain}/||g" -e 's|,| |g' -e 's|[]/"[]||g'` )
+    else
+        hosts=( $* )
+    fi
+
+    if [[ ${#hosts[@]} -eq 0 ]]; then
+        error "At least one host or the --all option must be specified"
+        up_usage
+    fi
+
+    declare -A host_state
+    for host in "${hosts[@]}"; do
+        log "Checking state of ${host}.${domain}"
+        libvirt_state=`query_libvirt $host`
+        consul_state=`query_consul $host`
+        host_state[$host]="${libvirt_state} ${consul_state}"
+    done
+
+    ###
+    # For now, we just bring up the puppetmaster first.  May want to make
+    # this more generic and provide a configuration setting to set the order
+    # in which an initial set of hosts is brought up serially.
+    ###
+
+    # pass 1: puppetmaster(s)
+    for host in "${hosts[@]}"; do
+        regex="^puppetmaster"
+        if [[ ! ( $host =~ $regex ) ]]; then
+            continue
+        fi
+
+        state=( ${host_state[$host]} )
+        if [[ "${state[0]}" != "running" ]]; then
+            remove_vm $host $remove_perpetual
+            deploy_vm $host
+            start_vm $host
+        fi
+
+        # wait for the puppetmaster service to become available
+        # TODO: put a timeout on this, with a tear down and retry on timeout
+        while true; do
+            log "Waiting for initial boot of '${host}.${domain}' to complete"
+            libvirt_state=`query_libvirt $host`
+            consul_state=`query_consul $host`
+            host_state[$host]="${libvirt_state} ${consul_state}"
+
+            state=( $consul_state )
+            regex="^(.*,)?puppet(,.*)?$"
+            if [[ ${state[1]} =~ $regex ]]; then
+                log "Puppetmaster service is up (state is ${state[1]})"
+                break
+            fi
+
+            sleep 60
+        done
+    done
+
+    # pass 2: all other hosts
+    for host in "${hosts[@]}"; do
+        state=( ${host_state[$host]} )
+        if [[ "${state[0]}" != "running" ]]; then
+            remove_vm $host $remove_perpetual
+            deploy_vm $host
+            start_vm $host
+        fi
+    done
+}
+
+######################################################################
+
+destroy_usage(){
+    cat <<EOF
+
+Usage: $0 destroy [<args>]
+
+Valid args are:
+    help        display this mess
+    xxx         xxx
+    xxx         xxx
+EOF
+
+    exit 1
+}
+
+destroy(){
+    PARSED_OPTIONS=$(getopt -n "$0" -o a --long "all,remove-perpetual" -- "$@")
+    if [[ $? -ne 0 ]]; then
+        destroy_usage
+    fi
+    eval set -- "$PARSED_OPTIONS"
+
+    while true; do
+        case "$1" in
+            -a|--all)
+                all=1
+                shift;;
+            --remove-perpetual)
+                remove_perpetual=1
+                shift;;
+            --)
+                shift
+                break;;
+        esac
+    done
+
+    # construct list of hosts, either from command line or by pulling all
+    # host names within $domain in from Consul
+    declare -a hosts
+    if [[ $all -eq 1 ]]; then
+        hosts=( `curl -s "${consul_url}/v1/kv/nodes/${domain}/?keys&separator=/&token=${acl_token}" | sed -e "s|nodes/${domain}/||g" -e 's|,| |g' -e 's|[]/"[]||g'` )
+    else
+        hosts=( $* )
+    fi
+
+    if [[ ${#hosts[@]} -eq 0 ]]; then
+        error "At least one host or the --all option must be specified"
+        destroy_usage
+    fi
+
+    for host in "${hosts[@]}"; do
+            remove_vm $host $remove_perpetual
+    done
+}
+
+######################################################################
+# Read and call subcommand
+######################################################################
+
+subcommand=$1
+shift
+case "$subcommand" in
+    console|destroy|up)
+        $subcommand $*;;
+    --help|help)
+        usage;;
+    --version|version)
+        version;;
+    *)
+        echo "Unknown command: $subcommand"
+        usage;;
+esac
+
+
+# vim: ts=4:sw=4
