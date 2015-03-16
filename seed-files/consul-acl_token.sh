@@ -8,7 +8,7 @@
 #
 
 ##start parameters##
-ACL_TOKEN
+ACL_TOKEN=
 ##end parameters##
 
 # ensure a sane environment, even when running under cloud-init during boot
