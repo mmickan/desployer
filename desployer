@@ -541,6 +541,31 @@ up(){
 
             sleep 60
         done
+
+        # push puppet manifests if $puppetrepo is a valid git repo
+        if [ -n "${puppetrepo}" -a -d "${puppetrepo}/.git" ]; then
+            log "Uploading puppet manifests from '${puppetrepo}' to '${host}'"
+
+            pushd $puppetrepo
+
+            # get the IP address of the puppet master from Consul so DNS
+            # doesn't necessarily need to be configured to resolve from
+            # Consul on the vmhost
+            remote_ip=`consul members | tr ':' ' ' | awk "NR >= 2 && \\\$1 == \"${host}\" { print \\\$2 }"`
+
+            # remove old hostkey and add new one
+            ssh-keygen -R $host
+            ssh -o StrictHostKeyChecking=no root@$remote_ip true
+
+            # remove old remote and add new one
+            git remote remove $host
+            git remote add $host ssh://root@$remote_ip/srv/puppet.git 2>/dev/null
+
+            # push to the newly configured remote
+            git push $host HEAD:production
+
+            popd
+        fi
     done
 
     # pass 2: all other hosts
