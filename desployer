@@ -48,9 +48,6 @@ Available commands are:
     console     view console for a given VM
     destroy     stop VMs and remove configuration
     up          deploy and start VMs
-
-Globally recognised args:
-    --xxx       xxx
 EOF
 
     exit 1
@@ -266,13 +263,15 @@ build_seed_disk(){
                             s/^KEY=.*$/KEY="'"$key"'"/
                             /^##[a-z]* parameters##$/d
                         }
-                    ' > 00-${fqdn}_consul.sh
+                    ' > 00-${fqdn}_${seedfile}
+                # note ^^^^ this leading 00 is for bootup ordering
 
-                multipart_files="$multipart_files 00-${fqdn}_consul.sh:text/x-shellscript"
+                multipart_files="$multipart_files 00-${fqdn}_${seedfile}:text/x-shellscript"
                 ;;
 
             unbound.sh)
                 cp "${seed_path}${seedfile}" 01-${fqdn}_unbound.sh
+                # note that this leading 01 ^^^^ is for bootup ordering
                 multipart_files="$multipart_files 01-${fqdn}_unbound.sh:text/x-shellscript"
                 ;;
 
@@ -293,7 +292,7 @@ build_seed_disk(){
     cloud-localds -H $fqdn ${seed_disk} ${fqdn}_userdata.txt
 
     # remove working files
-    rm -f 00-${fqdn}_consul.sh
+    rm -f 00-${fqdn}_consul*.sh
     rm -f 01-${fqdn}_unbound.sh
     rm -f ${fqdn}_userdata.txt
 }
@@ -454,7 +453,7 @@ Usage: $0 up [<args>] [<hostname>]
 
 Valid args are:
     help                display this mess
-    --all               bring up all hosts
+    --redeploy          shut down and redeploy configured VM(s)
     --remove-perpetual  remove and reprovision perpetual disks
 EOF
 
@@ -462,7 +461,7 @@ EOF
 }
 
 up(){
-    PARSED_OPTIONS=$(getopt -n "$0" -o a --long "all,remove-perpetual" -- "$@")
+    PARSED_OPTIONS=$(getopt -n "$0" -o rp --long "redeploy,remove-perpetual" -- "$@")
     if [[ $? -ne 0 ]]; then
         up_usage
     fi
@@ -470,10 +469,10 @@ up(){
 
     while true; do
         case "$1" in
-            -a|--all)
-                all=1
+            -r|--redeploy)
+                redeploy=1
                 shift;;
-            --remove-perpetual)
+            -p|--remove-perpetual)
                 remove_perpetual=1
                 shift;;
             --)
@@ -485,7 +484,8 @@ up(){
     # construct list of hosts, either from command line or by pulling all
     # host names within $domain in from Consul
     declare -a hosts
-    if [[ $all -eq 1 ]]; then
+    if [[ $* = "" ]]; then
+        # no hosts provideed as arguments to script
         hosts=( `curl -s "${consul_url}/v1/kv/nodes/${domain}/?keys&separator=/&token=${acl_token}" | sed -e "s|nodes/${domain}/||g" -e 's|,| |g' -e 's|[]/"[]||g'` )
     else
         hosts=( $* )
@@ -571,7 +571,7 @@ EOF
 }
 
 destroy(){
-    PARSED_OPTIONS=$(getopt -n "$0" -o a --long "all,remove-perpetual" -- "$@")
+    PARSED_OPTIONS=$(getopt -n "$0" -o f --long "force,remove-perpetual" -- "$@")
     if [[ $? -ne 0 ]]; then
         destroy_usage
     fi
@@ -579,8 +579,8 @@ destroy(){
 
     while true; do
         case "$1" in
-            -a|--all)
-                all=1
+            -f|--force)
+                force=1
                 shift;;
             --remove-perpetual)
                 remove_perpetual=1
@@ -591,10 +591,25 @@ destroy(){
         esac
     done
 
+    if [[ $force -ne 1 ]]; then
+        if [[ $* = "" ]]; then
+            echo -n 'Are you sure you want to destroy all VMs? [y/N] '
+        elif [[ `echo -n $* | grep "\s"` ]]; then
+            echo -n "Are you sure you want to destroy the VMs '$*'? [y/N] "
+        else
+            echo -n "Are you sure you want to destroy the '$*' VM? [y/N] "
+        fi
+
+        read confirm
+        if [[ ! $confirm =~ ^[Yy]$ ]]; then
+            exit 0
+        fi
+    fi
+
     # construct list of hosts, either from command line or by pulling all
     # host names within $domain in from Consul
     declare -a hosts
-    if [[ $all -eq 1 ]]; then
+    if [[ $* = "" ]]; then
         hosts=( `curl -s "${consul_url}/v1/kv/nodes/${domain}/?keys&separator=/&token=${acl_token}" | sed -e "s|nodes/${domain}/||g" -e 's|,| |g' -e 's|[]/"[]||g'` )
     else
         hosts=( $* )
