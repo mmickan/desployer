@@ -146,8 +146,8 @@ gem install --no-rdoc --no-ri deep_merge
 cat > /etc/puppet/hiera.yaml <<'EOF'
 ---
 :backends:
-  - yaml
   - consul
+  - yaml
   - module_data
 
 :hierarchy:
@@ -175,14 +175,8 @@ cd /tmp/bootstrap
 mkdir -p -m 02775 modules manifests hieradata/{nodes,locations}
 
 cat > manifests/site.pp <<EOF
-hiera_include('classes')
-EOF
-
-cat > hieradata/nodes/$fqdn.yaml <<EOF
----
-classes:
-  - puppetdb
-  - puppetdb::master::config
+include puppetdb
+include puppetdb::master::config
 EOF
 
 cat > Puppetfile <<EOF
