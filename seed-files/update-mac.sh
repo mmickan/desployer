@@ -2,8 +2,14 @@
 #
 # update-eth0-mac.sh
 #
-# Ensure that the MAC address for eth0 is stored in Consul.
+# Ensure that the MAC address for eth0 is stored in Consul.  Takes no
+# parameters, but requires the ACL_TOKEN variable to be set to the value to
+# be set to a suitable token for writing to Consul.
 #
+
+##start parameters##
+ACL_TOKEN=
+##end parameters##
 
 # ensure a sane environment, even when running under cloud-init during boot
 export HOME=/root
@@ -24,10 +30,10 @@ if [ -z `which curl` ]; then
     [ -e /usr/bin/yum ]     && yum -y -q install curl
 fi
 
-saved_mac=`curl -s http://localhost:8500/v1/kv/nodes/$(dnsdomainname)/$(hostname)/mac-address/eth0?raw`
+saved_mac=`curl -s "http://localhost:8500/v1/kv/nodes/$(dnsdomainname)/$(hostname)/mac-address/eth0?raw&token=${ACL_TOKEN}"`
 mac=`ifconfig eth0 | awk '$4 == "HWaddr" { print $5 }'`
 
 if [ "$mac" != "$saved_mac" ]; then
     log "Updating MAC address in Consul (old value: '${saved_mac}', new value: '${mac}'"
-    echo -n "$mac" | curl -s -X PUT -o /dev/null -T - http://localhost:8500/v1/kv/nodes/$(dnsdomainname)/$(hostname)/mac-address/eth0
+    echo -n "$mac" | curl -s -X PUT -o /dev/null -T - "http://localhost:8500/v1/kv/nodes/$(dnsdomainname)/$(hostname)/mac-address/eth0?token=${ACL_TOKEN}"
 fi

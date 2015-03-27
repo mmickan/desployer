@@ -275,6 +275,19 @@ build_seed_disk(){
                 multipart_files="$multipart_files 01-${fqdn}_unbound.sh:text/x-shellscript"
                 ;;
 
+            # remaining files that require substitutions
+            update-mac.sh)
+                cat "${seed_path}${seedfile}" \
+                    | sed '
+                        /##start parameters##/,/##end parameters##/ {
+                            s/^ACL_TOKEN=.*$/ACL_TOKEN="'"$acl_token"'"/
+                            /^##[a-z]* parameters##$/d
+                        }
+                    ' > ${fqdn}_${seedfile}
+
+                multipart_files="$multipart_files ${fqdn}_${seedfile}:text/x-shellscript"
+                ;;
+
             *.sh)
                 multipart_files="$multipart_files ${seed_path}${seedfile}:text/x-shellscript"
                 ;;
@@ -294,6 +307,7 @@ build_seed_disk(){
     # remove working files
     rm -f 00-${fqdn}_consul*.sh
     rm -f 01-${fqdn}_unbound.sh
+    rm -f ${fqdn}_update-mac.sh
     rm -f ${fqdn}_userdata.txt
 }
 
