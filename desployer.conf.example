@@ -17,6 +17,9 @@ common="cloud-config consul.sh unbound.sh update-mac.sh"
 profiles[puppetmaster]="$common consul-acl_token.sh puppetmaster-bootstrap.sh puppetmaster-production.sh"
 profiles[puppet]="$common puppet-bootstrap.sh"
 
+# Libvirt volume pool for gold master images
+gm_pool=default
+
 # Libvirt volume pool for OS disks
 disk1_pool=default
 

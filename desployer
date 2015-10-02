@@ -313,8 +313,10 @@ build_seed_disk(){
 
 # Deploy a VM.  Takes the following parameters:
 # - $1: unqualified hostname of VM to deploy
+# - $2: set to "1" to deploy root disk as qcow2 snapshot (for deployment speed)
 deploy_vm(){
     local host=$1
+    local snapshot=${2:-0}
 
     local fqdn="${host}.${domain}"
 
@@ -346,15 +348,21 @@ deploy_vm(){
     if [ $vol_exists -eq 0 ]; then
         log "Creating OS volume from '${image}' image"
         export vol_size=${disk1}
-        export format=qcow2
-        export backing_path=$(virsh -c qemu+ssh://${placement}/system vol-list --pool ${disk1_pool} | awk 'NR>2 && $1 == "gm-'"${image}"'" { print $2 }')
-        if [ -z $backing_path ]; then
-            fatal "Machine image '${image}' not found on '${placement}'"
-        fi
-        export backing_format=qcow2  # TODO: get this from virsh vol-dumpxml
         export vol_name=${fqdn}_disk1
-        erb templates/snapshot.xml.erb >${fqdn}_disk1.xml
-        virsh -c qemu+ssh://${placement}/system vol-create ${disk1_pool} ${fqdn}_disk1.xml
+        if [ $snapshot -eq 1 ]; then
+            export format=qcow2
+            export backing_path=$(virsh -c qemu+ssh://${placement}/system vol-list --pool ${gm_pool} | awk 'NR>2 && $1 == "gm-'"${image}"'" { print $2 }')
+            if [ -z $backing_path ]; then
+                fatal "Machine image '${image}' not found on '${placement}'"
+            fi
+            export backing_format=qcow2  # TODO: get this from virsh vol-dumpxml
+            erb templates/snapshot.xml.erb >${fqdn}_disk1.xml
+            virsh -c qemu+ssh://${placement}/system vol-create ${disk1_pool} ${fqdn}_disk1.xml
+        else
+            export format=raw
+            erb templates/volume.xml.erb >${fqdn}_disk1.xml
+            virsh -c qemu+ssh://${placement}/system vol-create-from ${disk1_pool} ${fqdn}_disk1.xml gm-${image} --inputpool ${gm_pool}
+        fi
     else
         log "OS volume already exists, not creating"
     fi
@@ -367,7 +375,7 @@ deploy_vm(){
             vol_exists=$(virsh -c qemu+ssh://${placement}/system vol-list --pool ${pool} | awk 'NR>2 { print $1 }' | grep "^${fqdn}_${disk}$" | wc -l)
             if [ $vol_exists -eq 0 ]; then
                 log "Creating '${fqdn}_${disk}' volume with size ${vol_size}G"
-                virsh -c qemu+ssh://${placement}/system vol-create-as $pool ${fqdn}_${disk} ${vol_size}G --format qcow2
+                virsh -c qemu+ssh://${placement}/system vol-create-as $pool ${fqdn}_${disk} ${vol_size}G --format raw
             else
                 log "'${fqdn}_${disk}' volume already exists, not creating"
             fi
@@ -400,9 +408,13 @@ deploy_vm(){
     export vcpus
     export mac
     export disk1_path=$(virsh -c qemu+ssh://${placement}/system vol-list --pool ${disk1_pool} | awk 'NR>2 && $1 == "'"${fqdn}"'_disk1" { print $2 }')
-    export disk1_format=qcow2
+    if [ $snapshot -eq 1 ]; then
+        export disk1_format=qcow2
+    else
+        export disk1_format=raw
+    fi
     export disk2_path=$(virsh -c qemu+ssh://${placement}/system vol-list --pool ${disk1_pool} | awk 'NR>2 && $1 == "'"${fqdn}"'_disk2" { print $2 }')
-    export disk2_format=qcow2
+    export disk2_format=raw
     erb templates/${template} >${fqdn}_vm.xml
     vm_exists=$(virsh -c qemu+ssh://${placement}/system list --all | awk 'NR>2 { print $2 }' | grep "^${fqdn}$" | wc -l)
     if [ $vm_exists -eq 0 ]; then
@@ -469,13 +481,14 @@ Valid args are:
     help                display this mess
     --redeploy          shut down and redeploy configured VM(s)
     --remove-perpetual  remove and reprovision perpetual disks
+    --snapshot          use a qcow2 snapshot of the gold master
 EOF
 
     exit 1
 }
 
 up(){
-    PARSED_OPTIONS=$(getopt -n "$0" -o rp --long "redeploy,remove-perpetual" -- "$@")
+    PARSED_OPTIONS=$(getopt -n "$0" -o rps --long "redeploy,remove-perpetual,snapshot" -- "$@")
     if [[ $? -ne 0 ]]; then
         up_usage
     fi
@@ -488,6 +501,9 @@ up(){
                 shift;;
             -p|--remove-perpetual)
                 remove_perpetual=1
+                shift;;
+            -s|--snapshot)
+                snapshot=1
                 shift;;
             --)
                 shift
@@ -534,7 +550,7 @@ up(){
         state=( ${host_state[$host]} )
         if [[ "${state[0]}" != "running" ]]; then
             remove_vm $host $remove_perpetual
-            deploy_vm $host
+            deploy_vm $host $snapshot
             start_vm $host
         fi
 
@@ -587,7 +603,7 @@ up(){
         state=( ${host_state[$host]} )
         if [[ "${state[0]}" != "running" ]]; then
             remove_vm $host $remove_perpetual
-            deploy_vm $host
+            deploy_vm $host $snapshot
             start_vm $host
         fi
     done
@@ -601,9 +617,9 @@ destroy_usage(){
 Usage: $0 destroy [<args>]
 
 Valid args are:
-    help        display this mess
-    xxx         xxx
-    xxx         xxx
+    help                display this mess
+    --force             do not prompt for confirmation
+    --remove-perpetual  remove perpetual disks
 EOF
 
     exit 1
