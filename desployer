@@ -302,13 +302,20 @@ build_seed_disk(){
     write-mime-multipart --gzip --output=${fqdn}_userdata.txt $multipart_files
 
     log "Building config disk image"
-    cloud-localds -H $fqdn ${seed_disk} ${fqdn}_userdata.txt
+    cat >${fqdn}_metadata.json <<EOF
+{
+"instance-id": "iid-local01",
+"local-hostname": "$fqdn",
+}
+EOF
+    cloud-localds ${seed_disk} ${fqdn}_userdata.txt ${fqdn}_metadata.json
 
     # remove working files
     rm -f 00-${fqdn}_consul*.sh
     rm -f 01-${fqdn}_unbound.sh
     rm -f ${fqdn}_update-mac.sh
     rm -f ${fqdn}_userdata.txt
+    rm -f ${fqdn}_metadata.json
 }
 
 # Deploy a VM.  Takes the following parameters:
