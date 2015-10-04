@@ -243,8 +243,8 @@ build_seed_disk(){
 
             consul*.sh)
                 local join=
-                for server in `consul members | awk 'NR>1 && $4 == "server" { split($2,server,":"); print server[1] }'`; do
-                    [ ! -z $join ] && join="$join, "
+                for server in `consul members | awk 'NR>1 && $4 == "server" { gsub(/:[0-9]+$/, "", $2); print $2 }'`; do
+                    [ ! -z "$join" ] && join="$join, "
                     join="$join\\\\\"$server\\\\\""
                 done
                 if [ -z "$join" ]; then
