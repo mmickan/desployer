@@ -420,8 +420,9 @@ deploy_vm(){
     else
         export disk1_format=raw
     fi
-    export disk2_path=$(virsh -c qemu+ssh://${placement}/system vol-list --pool ${disk1_pool} | awk 'NR>2 && $1 == "'"${fqdn}"'_disk2" { print $2 }')
+    export disk2_path=$(virsh -c qemu+ssh://${placement}/system vol-list --pool ${disk2_pool} | awk 'NR>2 && $1 == "'"${fqdn}"'_disk2" { print $2 }')
     export disk2_format=raw
+    export seed_path=$(virsh -c qemu+ssh://${placement}/system vol-list --pool ${seed_pool} | awk 'NR>2 && $1 == "'"${fqdn}"'_seed" { print $2 }')
     erb templates/${template} >${fqdn}_vm.xml
     vm_exists=$(virsh -c qemu+ssh://${placement}/system list --all | awk 'NR>2 { print $2 }' | grep "^${fqdn}$" | wc -l)
     if [ $vm_exists -eq 0 ]; then
