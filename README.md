@@ -1,3 +1,7 @@
+**This repository has been archived**
+
+I haven't touched this -- or libvirt -- for a long time.
+
 # Desployer
 
 Desployer is a suite of shell scripts for deploying (and later destroying)
